@@ -1,0 +1,19 @@
+{
+  "name": "ghostty-wallpaper",
+  "version": "0.1.0",
+  "description": "Cycle Ghostty background images with a crossfade",
+  "type": "module",
+  "bin": {
+    "ghostty-wallpaper": "src/index.ts"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "sharp": "^0.35.5"
+  }
+}
