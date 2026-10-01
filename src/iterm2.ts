@@ -40,8 +40,9 @@ async function setImages(images: string[], frameMs: number) {
   }
 }
 
-// Checked first so AppleScript never launches iTerm2 itself.
-const running = () => Bun.spawnSync(["pgrep", "-x", "iTerm2"]).exitCode === 0;
+// Checked first so AppleScript never launches iTerm2 itself. `-a` because
+// pgrep skips its own ancestors, and run from iTerm2, iTerm2 is one.
+const running = () => Bun.spawnSync(["pgrep", "-a", "-x", "iTerm2"]).exitCode === 0;
 
 export const iterm2: Terminal = {
   name: "iTerm2",

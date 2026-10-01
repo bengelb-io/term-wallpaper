@@ -31,8 +31,11 @@ function show(image: string, s: Settings) {
     `background-image-opacity = ${s.opacity}`,
     "",
   ].join("\n"));
-  Bun.spawnSync(["pkill", "-USR2", "-x", "ghostty"]);
+  reload();
 }
+
+// `-a` because pkill skips its own ancestors, and run from Ghostty, Ghostty is one.
+const reload = () => Bun.spawnSync(["pkill", "-a", "-USR2", "-x", "ghostty"]);
 
 export const ghostty: Terminal = {
   name: "Ghostty",
@@ -62,6 +65,6 @@ export const ghostty: Terminal = {
 
   clear() {
     rmSync(STATE, { force: true });
-    Bun.spawnSync(["pkill", "-USR2", "-x", "ghostty"]);
+    reload();
   },
 };
