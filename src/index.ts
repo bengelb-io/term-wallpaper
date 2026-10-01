@@ -217,19 +217,22 @@ function uninstall(args: string[]) {
   if (args.length) fail(usage);
 
   const envs = loadEnvs();
-  const lines = t.uninstall();
-  if (!envs.includes(t.id) && !lines.length) {
-    console.log(`${t.name}: not set up`);
-    return;
-  }
-  for (const line of lines) console.log(line);
+  const wasSetUp = envs.includes(t.id);
+  // Run even when not recorded: it still undoes leftovers (iTerm2 images) and
+  // points at a hand-added Ghostty include.
+  for (const line of t.uninstall()) console.log(line);
   const left = envs.filter((e) => e !== t.id);
-  saveEnvs(left);
-  console.log(`${t.name}: uninstalled`);
+  if (wasSetUp) saveEnvs(left);
+  console.log(`${t.name}: ${wasSetUp ? "uninstalled" : "not set up"}`);
+
+  // A timer with no terminal left would fire with nothing to update. It can
+  // also predate envs.json, so check for it rather than assume.
   if (left.length) return;
-  setTimer("off");
-  console.log("no terminals left; removed the timer");
-  console.log("to remove the command itself: bun remove -g term-wallpaper");
+  if (existsSync(PLIST)) {
+    setTimer("off");
+    console.log("no terminals left; removed the timer");
+  }
+  if (wasSetUp) console.log("to remove the command itself: bun remove -g term-wallpaper");
 }
 
 /**

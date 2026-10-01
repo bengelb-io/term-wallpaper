@@ -306,6 +306,27 @@ test("uninstall in a terminal that was never set up changes nothing", () => {
   expect(state()).toEqual(before);
 });
 
+test("uninstall in an unrecorded terminal says so, without claiming to remove a timer", () => {
+  ghosttyConfig("config-file = ?~/.config/ghostty/wallpaper.conf\n");
+
+  expect(run("uninstall", "--env", "ghostty")).toBe(
+    `Ghostty: delete the config-file = ?…/wallpaper.conf line from ${home}/.config/ghostty/config\n`
+      + "Ghostty: not set up\n",
+  );
+});
+
+test("a timer left with no terminal recorded is removed, and reported once", () => {
+  // A timer from before envs.json existed.
+  writeFileSync(join(home, "Library/LaunchAgents/com.term-wallpaper.plist"), "");
+  writeFileSync(join(fake, "launchd/com.term-wallpaper"), "");
+
+  expect(run("uninstall", "--env", "iterm2")).toBe(
+    "iTerm2: not set up\nno terminals left; removed the timer\n",
+  );
+  expect(readdirSync(join(fake, "launchd"))).toEqual([]);
+  expect(run("uninstall", "--env", "ghostty")).toBe("Ghostty: not set up\n");
+});
+
 // --- detection ----------------------------------------------------------------
 
 test("init and env detect the terminal they run in", () => {
