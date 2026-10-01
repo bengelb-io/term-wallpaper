@@ -35,7 +35,8 @@ function show(image: string, s: Settings) {
 }
 
 // `-a` because pkill skips its own ancestors, and run from Ghostty, Ghostty is one.
-const reload = () => Bun.spawnSync(["pkill", "-a", "-USR2", "-x", "ghostty"]);
+// The signal must come first: macOS pkill reads `-a -USR2` as `-a -U SR2`.
+const reload = () => Bun.spawnSync(["pkill", "-USR2", "-a", "-x", "ghostty"]);
 
 export const ghostty: Terminal = {
   name: "Ghostty",
