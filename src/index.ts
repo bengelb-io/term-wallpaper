@@ -2,8 +2,12 @@
 // Rotate terminal background images with a crossfade.
 //
 // Terminals have no image transitions, so a change pre-renders blended frames
-// and shows them in quick succession. Each supported terminal (src/ghostty.ts,
-// src/iterm2.ts) that is set up and running receives every change.
+// and shows them in quick succession.
+//
+// `init` and `uninstall` act only on the terminal they run in (src/env.ts), or
+// the one `--env` names. Wallpaper changes go to every terminal set up so far
+// (envs.json), since there is one current image and the timer runs outside any
+// terminal.
 
 import sharp from "sharp";
 import { userInfo } from "node:os";
@@ -12,13 +16,14 @@ import {
   existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import {
-  CACHE, HOME, current, duration, expand, fail, loadSettings, saveSettings, setCurrent,
-  type Settings,
+  CACHE, ENV_IDS, HOME, current, duration, expand, fail, loadEnvs, loadSettings, saveEnvs,
+  saveSettings, setCurrent, type EnvId, type Settings, type Terminal,
 } from "./common";
+import { resolve } from "./env";
 import { ghostty } from "./ghostty";
 import { iterm2 } from "./iterm2";
 
-const TERMINALS = [ghostty, iterm2];
+const ADAPTERS: Record<EnvId, Terminal> = { ghostty, iterm2 };
 const LABEL = "com.term-wallpaper";
 const PLIST = join(HOME, "Library/LaunchAgents", `${LABEL}.plist`);
 const LOG = join(HOME, "Library/Logs/term-wallpaper.log");
@@ -66,9 +71,27 @@ async function frames(s: Settings, from: string, to: string): Promise<string[]> 
   return [...blended, to];
 }
 
-async function apply(s: Settings, src: string) {
-  const targets = TERMINALS.filter((t) => t.active());
-  if (!targets.length) fail("no terminal to update: run `term-wallpaper init`, and start iTerm2 if you use it");
+const configured = () => loadEnvs().map((id) => ADAPTERS[id]);
+
+/**
+ * Configured terminals that can show a change now. One whose setup has gone
+ * missing since `init` (Ghostty's include deleted by hand) is skipped with a
+ * warning rather than reported as set.
+ */
+function reachable(): Terminal[] {
+  return configured().filter((t) => {
+    if (t.setUp() === false) {
+      console.error(`${t.name}: its setup is missing; run \`term-wallpaper init --env ${t.id}\``);
+      return false;
+    }
+    return t.reachable();
+  });
+}
+
+async function apply(s: Settings, src: string, targets = reachable()) {
+  if (!targets.length) {
+    fail("no terminal to update: run `term-wallpaper init` in your terminal, and start iTerm2 if you use it");
+  }
 
   const to = await normalize(s, src);
   const prev = current();
@@ -147,26 +170,86 @@ ${args.map((a) => `\t\t<string>${a}</string>`).join("\n")}
 
 // --- commands ----------------------------------------------------------------
 
-async function init(args: string[]) {
-  const s = loadSettings();
-  const i = args.indexOf("--dir");
-  if (i >= 0) s.dir = args[i + 1] ?? fail("usage: term-wallpaper init [--dir <path>]");
+/** Remove `--name <value>` from `args` and return the value. */
+function option(args: string[], name: string, usage: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i < 0) return;
+  const value = args[i + 1] ?? fail(usage);
+  args.splice(i, 2);
+  return value;
+}
 
-  const installed = TERMINALS.filter((t) => t.installed());
-  if (!installed.length) fail(`no supported terminal found (${TERMINALS.map((t) => t.name).join(", ")})`);
+/** Set up the terminal this runs in (or `--env`). Safe to run again. */
+async function init(args: string[]) {
+  const usage = "usage: term-wallpaper init [--env <terminal>] [--dir <path>]";
+  const t = ADAPTERS[resolve(option(args, "--env", usage))];
+  const s = loadSettings();
+  const dir = option(args, "--dir", usage);
+  if (dir) s.dir = dir;
+  if (args.length) fail(usage);
 
   mkdirSync(expand(s.dir), { recursive: true });
   s.size = screenSize() ?? s.size;
   saveSettings(s);
 
-  for (const t of installed) for (const line of t.init()) console.log(line);
+  for (const line of t.init()) console.log(line);
+  const envs = loadEnvs();
+  if (!envs.includes(t.id)) saveEnvs([...envs, t.id]);
   console.log(`images: ${s.dir} (${images(s).length} found)`);
   console.log(`screen: ${s.size.join("x")}`);
+  if (s.every !== "off") setTimer(s.every);
 
-  if (!TERMINALS.some((t) => t.active())) return;
+  // Show the wallpaper in the terminal just set up; the others already have it.
+  if (!t.reachable()) return;
   const cur = current();
-  if (cur && existsSync(cur)) await apply(s, cur);
-  else if (images(s).length) await apply(s, s.order === "random" ? pickRandom(s) : pick(s, 1));
+  if (cur && existsSync(cur)) await apply(s, cur, [t]);
+  else if (images(s).length) await apply(s, s.order === "random" ? pickRandom(s) : pick(s, 1), [t]);
+}
+
+/**
+ * Undo `init` for the terminal this runs in (or `--env`). Settings and cache
+ * stay for the other terminals and a later `init`; the timer goes with the
+ * last terminal, since it would otherwise fire with nothing to update.
+ */
+function uninstall(args: string[]) {
+  const usage = "usage: term-wallpaper uninstall [--env <terminal>]";
+  const t = ADAPTERS[resolve(option(args, "--env", usage))];
+  if (args.length) fail(usage);
+
+  const envs = loadEnvs();
+  const lines = t.uninstall();
+  if (!envs.includes(t.id) && !lines.length) {
+    console.log(`${t.name}: not set up`);
+    return;
+  }
+  for (const line of lines) console.log(line);
+  const left = envs.filter((e) => e !== t.id);
+  saveEnvs(left);
+  console.log(`${t.name}: uninstalled`);
+  if (left.length) return;
+  setTimer("off");
+  console.log("no terminals left; removed the timer");
+  console.log("to remove the command itself: bun remove -g term-wallpaper");
+}
+
+/**
+ * Configured terminals and whether their setup is really in place, plus any
+ * terminal set up outside `init` (a hand-added Ghostty include).
+ */
+function listEnvs() {
+  const envs = loadEnvs();
+  let any = false;
+  for (const id of ENV_IDS) {
+    const setUp = ADAPTERS[id].setUp();
+    const fix = `run \`term-wallpaper init --env ${id}\``;
+    let status: string;
+    if (envs.includes(id)) status = setUp === false ? `setup missing; ${fix}` : "ok";
+    else if (setUp) status = `set up but not recorded; ${fix}`;
+    else continue;
+    console.log(`${id}\t${status}`);
+    any = true;
+  }
+  if (!any) console.log("no terminals set up; run `term-wallpaper init` in one");
 }
 
 async function config(args: string[]) {
@@ -197,7 +280,8 @@ async function config(args: string[]) {
       case "every":
         if (value !== "off") duration(value);
         s.every = value;
-        setTimer(value);
+        // With no terminal set up there is nothing to rotate; `init` starts it.
+        if (value === "off" || loadEnvs().length) setTimer(value);
         break;
       case "order":
         if (value !== "sequential" && value !== "random") fail("order must be sequential or random");
@@ -223,13 +307,14 @@ async function config(args: string[]) {
   const cur = current();
   if (restyle && cur && existsSync(cur)) {
     const image = await normalize(s, cur);
-    for (const t of TERMINALS.filter((t) => t.active())) t.restyle(image, s);
+    for (const t of reachable()) t.restyle(image, s);
   }
 }
 
 const USAGE = `usage: term-wallpaper <command>
 
-  init [--dir <path>]     Set up installed terminals, image folder and screen size
+  init [--env <terminal>] [--dir <path>]
+                          Set up this terminal, image folder and screen size
   next, -n, --next        Next wallpaper (random if order=random)
   prev, -p, --prev        Previous wallpaper in folder order
   random                  Random wallpaper
@@ -240,8 +325,13 @@ const USAGE = `usage: term-wallpaper <command>
                             order (sequential|random), opacity (0.3, Ghostty only),
                             size (2560x1440)
   off                     Clear the wallpaper
+  uninstall [--env <terminal>]
+                          Undo init for this terminal; the last one also stops the timer
+  env                     The terminal this is running in
+  envs                    Terminals set up, and whether their setup is in place
 
-Supported terminals: ${TERMINALS.map((t) => t.name).join(", ")}`;
+init and uninstall act on the terminal they run in; --env names one instead
+(${ENV_IDS.join(", ")}). Wallpaper changes go to every terminal set up.`;
 
 const [cmd = "next", ...rest] = process.argv.slice(2);
 const s = loadSettings();
@@ -274,10 +364,19 @@ switch (cmd) {
     await config(rest);
     break;
   case "off":
-    for (const t of TERMINALS) t.clear();
+    for (const t of configured()) t.clear();
     setCurrent(undefined);
     rmSync(join(CACHE, "fade"), { recursive: true, force: true });
     console.log("wallpaper off");
+    break;
+  case "uninstall":
+    uninstall(rest);
+    break;
+  case "env":
+    console.log(resolve());
+    break;
+  case "envs":
+    listEnvs();
     break;
   case "help": case "-h": case "--help":
     console.log(USAGE);
