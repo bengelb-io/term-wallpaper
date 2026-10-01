@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "description": "Cycle Ghostty background images with a crossfade",
   "type": "module",
+  "repository": "github:bengelb-io/ghostty-wallpaper",
+  "os": ["darwin"],
   "bin": {
     "ghostty-wallpaper": "src/index.ts"
   },
