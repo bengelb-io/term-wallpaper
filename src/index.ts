@@ -1,100 +1,33 @@
 #!/usr/bin/env bun
-// Cycle Ghostty background images with a crossfade.
+// Rotate terminal background images with a crossfade.
 //
-// Ghostty has no image transitions, so a change pre-renders blended frames and
-// reloads the config through them (SIGUSR2). The current pick lives in
-// ~/.config/ghostty/wallpaper.conf, included from the main Ghostty config.
+// Terminals have no image transitions, so a change pre-renders blended frames
+// and shows them in quick succession. Each supported terminal (src/ghostty.ts,
+// src/iterm2.ts) that is set up and running receives every change.
 
 import sharp from "sharp";
-import { homedir, userInfo } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { userInfo } from "node:os";
+import { basename, extname, join } from "node:path";
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync,
-  realpathSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
+import {
+  CACHE, HOME, current, duration, expand, fail, loadSettings, saveSettings, setCurrent,
+  type Settings,
+} from "./common";
+import { ghostty } from "./ghostty";
+import { iterm2 } from "./iterm2";
 
-const HOME = homedir();
-const XDG = process.env.XDG_CONFIG_HOME ?? join(HOME, ".config");
-const STATE = join(XDG, "ghostty/wallpaper.conf");
-const SETTINGS = join(XDG, "ghostty-wallpaper/settings.json");
-const CACHE = join(HOME, "Library/Caches/ghostty-wallpaper");
-const LABEL = "com.ghostty-wallpaper";
+const TERMINALS = [ghostty, iterm2];
+const LABEL = "com.term-wallpaper";
 const PLIST = join(HOME, "Library/LaunchAgents", `${LABEL}.plist`);
-const LOG = join(HOME, "Library/Logs/ghostty-wallpaper.log");
+const LOG = join(HOME, "Library/Logs/term-wallpaper.log");
 const IMAGE = /\.(jpe?g|png|webp)$/i;
-
-type Settings = {
-  dir: string;
-  fade: string;
-  fps: number;
-  every: string;
-  order: "sequential" | "random";
-  opacity: number;
-  size: [number, number];
-};
-
-const DEFAULTS: Settings = {
-  dir: "~/Pictures/wallpapers",
-  fade: "500ms",
-  fps: 25,
-  every: "off",
-  order: "sequential",
-  opacity: 0.3,
-  size: [2560, 1440],
-};
-
-// --- helpers ---------------------------------------------------------------
-
-const expand = (p: string) => resolve(p.replace(/^~(?=$|\/)/, HOME));
-
-function fail(msg: string): never {
-  console.error(msg);
-  process.exit(1);
-}
-
-/** "500ms", "1.5s", "15m", "1h" → milliseconds; bare "0" allowed. */
-function duration(s: string): number {
-  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(s);
-  if (!m || (!m[2] && m[1] !== "0")) fail(`bad duration: ${s} (use e.g. 500ms, 30s, 15m, 1h)`);
-  const unit = { ms: 1, s: 1e3, m: 60e3, h: 3600e3 }[m[2] ?? "ms"]!;
-  return Number(m[1]) * unit;
-}
-
-function loadSettings(): Settings {
-  if (!existsSync(SETTINGS)) return { ...DEFAULTS };
-  return { ...DEFAULTS, ...JSON.parse(readFileSync(SETTINGS, "utf8")) };
-}
-
-function saveSettings(s: Settings) {
-  mkdirSync(join(SETTINGS, ".."), { recursive: true });
-  writeFileSync(SETTINGS, JSON.stringify(s, null, 2) + "\n");
-}
 
 function images(s: Settings): string[] {
   const dir = expand(s.dir);
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => IMAGE.test(f)).sort().map((f) => join(dir, f));
-}
-
-function current(): string | undefined {
-  if (!existsSync(STATE)) return;
-  return /^# src: (.+)$/m.exec(readFileSync(STATE, "utf8"))?.[1];
-}
-
-function reload() {
-  Bun.spawnSync(["pkill", "-USR2", "-x", "ghostty"]);
-}
-
-function show(s: Settings, src: string, img: string) {
-  writeFileSync(STATE, [
-    "# Managed by ghostty-wallpaper; changes are overwritten.",
-    `# src: ${src}`,
-    `background-image = ${img}`,
-    "background-image-fit = cover",
-    `background-image-opacity = ${s.opacity}`,
-    "",
-  ].join("\n"));
-  reload();
 }
 
 /** Cover-crop to screen size so any two images can be blended; cached. */
@@ -109,36 +42,42 @@ async function normalize(s: Settings, src: string): Promise<string> {
   return out;
 }
 
+/** Blended frames from `from` to `to`, ending with `to` itself. */
+async function frames(s: Settings, from: string, to: string): Promise<string[]> {
+  const count = Math.round((duration(s.fade) / 1000) * s.fps);
+  if (count < 2) return [to];
+
+  const dir = join(CACHE, "fade", String(process.pid));
+  rmSync(join(CACHE, "fade"), { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+
+  // Overlay the new image at rising alpha. Unique paths per frame so the
+  // terminal can't serve a cached image.
+  const blended = await Promise.all(
+    Array.from({ length: count - 1 }, async (_, i) => {
+      const { data, info } = await sharp(to).ensureAlpha((i + 1) / count)
+        .raw().toBuffer({ resolveWithObject: true });
+      const path = join(dir, `${i + 1}.jpg`);
+      await sharp(from).composite([{ input: data, raw: info }])
+        .jpeg({ quality: 85 }).toFile(path);
+      return path;
+    }),
+  );
+  return [...blended, to];
+}
+
 async function apply(s: Settings, src: string) {
+  const targets = TERMINALS.filter((t) => t.active());
+  if (!targets.length) fail("no terminal to update: run `term-wallpaper init`, and start iTerm2 if you use it");
+
   const to = await normalize(s, src);
   const prev = current();
-  const frames = Math.round((duration(s.fade) / 1000) * s.fps);
+  const shown = prev && prev !== src && existsSync(prev)
+    ? await frames(s, await normalize(s, prev), to)
+    : [to];
 
-  if (prev && prev !== src && existsSync(prev) && frames > 1) {
-    const from = await normalize(s, prev);
-    const dir = join(CACHE, "fade", String(process.pid));
-    rmSync(join(CACHE, "fade"), { recursive: true, force: true });
-    mkdirSync(dir, { recursive: true });
-
-    // Overlay the new image at rising alpha. Unique paths per frame so
-    // Ghostty can't serve a cached image.
-    const paths = await Promise.all(
-      Array.from({ length: frames - 1 }, async (_, i) => {
-        const { data, info } = await sharp(to).ensureAlpha((i + 1) / frames)
-          .raw().toBuffer({ resolveWithObject: true });
-        const path = join(dir, `${i + 1}.jpg`);
-        await sharp(from).composite([{ input: data, raw: info }])
-          .jpeg({ quality: 85 }).toFile(path);
-        return path;
-      }),
-    );
-    for (const path of paths) {
-      show(s, src, path);
-      await Bun.sleep(1000 / s.fps);
-    }
-  }
-
-  show(s, src, to);
+  await Promise.all(targets.map((t) => t.play(shown, 1000 / s.fps, s)));
+  setCurrent(src);
   console.log(`set: ${basename(src)}`);
 }
 
@@ -167,16 +106,6 @@ function screenSize(): [number, number] | undefined {
     const m = /(\d+) x (\d+)/.exec(main?._spdisplays_pixels ?? "");
     if (m) return [Number(m[1]), Number(m[2])];
   } catch {}
-}
-
-function ghosttyConfig(): string {
-  const candidates = [
-    join(XDG, "ghostty/config.ghostty"),
-    join(XDG, "ghostty/config"),
-    join(HOME, "Library/Application Support/com.mitchellh.ghostty/config.ghostty"),
-    join(HOME, "Library/Application Support/com.mitchellh.ghostty/config"),
-  ];
-  return candidates.find(existsSync) ?? candidates[0]!;
 }
 
 // --- launchd timer -----------------------------------------------------------
@@ -221,31 +150,26 @@ ${args.map((a) => `\t\t<string>${a}</string>`).join("\n")}
 async function init(args: string[]) {
   const s = loadSettings();
   const i = args.indexOf("--dir");
-  if (i >= 0) s.dir = args[i + 1] ?? fail("usage: ghostty-wallpaper init [--dir <path>]");
+  if (i >= 0) s.dir = args[i + 1] ?? fail("usage: term-wallpaper init [--dir <path>]");
+
+  const installed = TERMINALS.filter((t) => t.installed());
+  if (!installed.length) fail(`no supported terminal found (${TERMINALS.map((t) => t.name).join(", ")})`);
 
   mkdirSync(expand(s.dir), { recursive: true });
   s.size = screenSize() ?? s.size;
   saveSettings(s);
 
-  const config = ghosttyConfig();
-  const text = existsSync(config) ? readFileSync(config, "utf8") : "";
-  if (/^\s*config-file\s*=.*ghostty\/wallpaper\.conf\s*$/m.test(text)) {
-    console.log(`ghostty config: ${config} (already includes wallpaper.conf)`);
-  } else {
-    mkdirSync(join(config, ".."), { recursive: true });
-    const sep = text && !text.endsWith("\n") ? "\n" : "";
-    appendFileSync(config, `${sep}\n# Background image, managed by ghostty-wallpaper\nconfig-file = ?${STATE}\n`);
-    console.log(`ghostty config: ${config} (added wallpaper.conf include)`);
-  }
+  for (const t of installed) for (const line of t.init()) console.log(line);
   console.log(`images: ${s.dir} (${images(s).length} found)`);
   console.log(`screen: ${s.size.join("x")}`);
 
+  if (!TERMINALS.some((t) => t.active())) return;
   const cur = current();
   if (cur && existsSync(cur)) await apply(s, cur);
   else if (images(s).length) await apply(s, s.order === "random" ? pickRandom(s) : pick(s, 1));
 }
 
-function config(args: string[]) {
+async function config(args: string[]) {
   const s = loadSettings();
   if (!args.length) {
     for (const [k, v] of Object.entries(s)) {
@@ -297,15 +221,15 @@ function config(args: string[]) {
   saveSettings(s);
 
   const cur = current();
-  if (restyle && cur && existsSync(STATE)) {
-    const img = /^background-image = (.+)$/m.exec(readFileSync(STATE, "utf8"))?.[1];
-    if (img) show(s, cur, img);
+  if (restyle && cur && existsSync(cur)) {
+    const image = await normalize(s, cur);
+    for (const t of TERMINALS.filter((t) => t.active())) t.restyle(image, s);
   }
 }
 
-const USAGE = `usage: ghostty-wallpaper <command>
+const USAGE = `usage: term-wallpaper <command>
 
-  init [--dir <path>]     Set up the Ghostty config, image folder and screen size
+  init [--dir <path>]     Set up installed terminals, image folder and screen size
   next, -n, --next        Next wallpaper (random if order=random)
   prev, -p, --prev        Previous wallpaper in folder order
   random                  Random wallpaper
@@ -313,8 +237,11 @@ const USAGE = `usage: ghostty-wallpaper <command>
   list                    List images, current one marked
   config [key=value ...]  Show or change settings:
                             dir, fade (500ms), fps (25), every (off|15m),
-                            order (sequential|random), opacity (0.3), size (2560x1440)
-  off                     Clear the wallpaper`;
+                            order (sequential|random), opacity (0.3, Ghostty only),
+                            size (2560x1440)
+  off                     Clear the wallpaper
+
+Supported terminals: ${TERMINALS.map((t) => t.name).join(", ")}`;
 
 const [cmd = "next", ...rest] = process.argv.slice(2);
 const s = loadSettings();
@@ -333,7 +260,7 @@ switch (cmd) {
     await apply(s, pickRandom(s));
     break;
   case "set": {
-    const file = rest[0] ? expand(rest[0]) : fail("usage: ghostty-wallpaper set <file>");
+    const file = rest[0] ? expand(rest[0]) : fail("usage: term-wallpaper set <file>");
     if (!existsSync(file)) fail(`no such file: ${rest[0]}`);
     await apply(s, file);
     break;
@@ -344,12 +271,12 @@ switch (cmd) {
     break;
   }
   case "config":
-    config(rest);
+    await config(rest);
     break;
   case "off":
-    rmSync(STATE, { force: true });
+    for (const t of TERMINALS) t.clear();
+    setCurrent(undefined);
     rmSync(join(CACHE, "fade"), { recursive: true, force: true });
-    reload();
     console.log("wallpaper off");
     break;
   case "help": case "-h": case "--help":

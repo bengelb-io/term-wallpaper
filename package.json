@@ -1,11 +1,12 @@
 {
-  "name": "ghostty-wallpaper",
-  "version": "0.1.0",
-  "description": "Cycle Ghostty background images with a crossfade",
+  "name": "term-wallpaper",
+  "version": "0.2.0",
+  "description": "Rotating terminal background images with a crossfade, for Ghostty and iTerm2",
   "type": "module",
-  "repository": "github:bengelb-io/ghostty-wallpaper",
+  "repository": "github:bengelb-io/term-wallpaper",
   "os": ["darwin"],
   "bin": {
+    "term-wallpaper": "src/index.ts",
     "ghostty-wallpaper": "src/index.ts"
   },
   "engines": {
