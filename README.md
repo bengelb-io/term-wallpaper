@@ -90,7 +90,7 @@ term-wallpaper config fade=1s opacity=0.4 every=30m order=random
 | `every` | `off` | Rotate on a timer: `30s`, `15m`, `1h`, or `off` |
 | `order` | `sequential` | `random` makes `next` and the timer shuffle |
 | `opacity` | `0.3` | Image opacity, 0–1 (Ghostty; iTerm2 uses its Blending slider) |
-| `size` | your screen | Pixel size images are cropped to; set by `init` |
+| `size` | your screen | Pixel size images are cropped to; set by `init`. A portrait image on a landscape screen is shown whole, over a blurred copy of itself |
 
 Settings are stored in `~/.config/term-wallpaper/settings.json`.
 
