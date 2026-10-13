@@ -30,14 +30,31 @@ function images(s: Settings): string[] {
   return readdirSync(dir).filter((f) => IMAGE.test(f)).sort().map((f) => join(dir, f));
 }
 
-/** Cover-crop to screen size so any two images can be blended; cached. */
+/**
+ * Fit to screen size so any two images can be blended; cached. Images are
+ * cover-cropped, except a portrait one on a landscape screen: the crop would
+ * lose most of its height, so it is shown whole over a blurred copy of itself.
+ */
 async function normalize(s: Settings, src: string): Promise<string> {
   const [w, h] = s.size;
-  const out = join(CACHE, "norm", `${w}x${h}-${basename(src, extname(src))}.jpg`);
+  const { width, height } = (await sharp(src).metadata()).autoOrient;
+  const whole = height > width && w > h;
+  // Its own folder, so a portrait's crop cached by an earlier version goes unused.
+  const out = join(
+    CACHE, "norm", whole ? "whole" : "", `${w}x${h}-${basename(src, extname(src))}.jpg`,
+  );
   if (!existsSync(out) || statSync(src).mtimeMs > statSync(out).mtimeMs) {
     mkdirSync(join(out, ".."), { recursive: true });
-    await sharp(src).rotate().resize(w, h, { fit: "cover" })
-      .toColourspace("srgb").jpeg({ quality: 92 }).toFile(out);
+    const upright = sharp(src).rotate();
+    let image = upright.clone().resize(w, h, { fit: "cover" });
+    if (whole) {
+      const backdrop = await image.blur(w / 80).raw().toBuffer({ resolveWithObject: true });
+      const photo = await upright.clone().resize(w, h, { fit: "inside" })
+        .raw().toBuffer({ resolveWithObject: true });
+      image = sharp(backdrop.data, { raw: backdrop.info })
+        .composite([{ input: photo.data, raw: photo.info }]);
+    }
+    await image.toColourspace("srgb").jpeg({ quality: 92 }).toFile(out);
   }
   return out;
 }
