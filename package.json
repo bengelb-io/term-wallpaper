@@ -13,7 +13,8 @@
     "bun": ">=1.1.0"
   },
   "scripts": {
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "test": "bun test"
   },
   "license": "MIT",
   "dependencies": {

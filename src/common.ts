@@ -9,6 +9,12 @@ export const CACHE = join(HOME, "Library/Caches/term-wallpaper");
 
 const SETTINGS = join(CONFIG_DIR, "settings.json");
 const CURRENT = join(CONFIG_DIR, "current");
+// App-managed, unlike settings.json: `config` can't reach it.
+const ENVS = join(CONFIG_DIR, "envs.json");
+
+export const ENV_IDS = ["ghostty", "iterm2"] as const;
+export type EnvId = (typeof ENV_IDS)[number];
+export const isEnvId = (s: string): s is EnvId => (ENV_IDS as readonly string[]).includes(s);
 
 export type Settings = {
   dir: string;
@@ -66,14 +72,29 @@ export function setCurrent(src: string | undefined) {
   writeFileSync(CURRENT, src ? src + "\n" : "");
 }
 
+/** Terminals `init` has set up, in the order they were added. */
+export function loadEnvs(): EnvId[] {
+  if (!existsSync(ENVS)) return [];
+  return (JSON.parse(readFileSync(ENVS, "utf8")) as string[]).filter(isEnvId);
+}
+
+export function saveEnvs(envs: EnvId[]) {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(ENVS, JSON.stringify(envs) + "\n");
+}
+
 /** A terminal that can show a background image. */
 export interface Terminal {
+  id: EnvId;
   name: string;
-  /** Installed on this machine. */
-  installed(): boolean;
-  /** Set up and running, so it should receive changes now. */
-  active(): boolean;
-  /** One-time setup; returns lines to print. */
+  /**
+   * Whether this terminal's own setup is in place (Ghostty: its config includes
+   * wallpaper.conf), or undefined for a terminal that keeps no setup to check.
+   */
+  setUp(): boolean | undefined;
+  /** Able to show a change right now (iTerm2: running). */
+  reachable(): boolean;
+  /** Setup; idempotent, and adopts a setup already in place. Returns lines to print. */
   init(): string[];
   /** Show each image in turn, `frameMs` apart, leaving the last on screen. */
   play(images: string[], frameMs: number, s: Settings): Promise<void>;
@@ -81,4 +102,6 @@ export interface Terminal {
   restyle(image: string, s: Settings): void;
   /** Remove the background image. */
   clear(): void;
+  /** Undo this terminal's `init` and wallpaper; returns lines to print. */
+  uninstall(): string[];
 }
